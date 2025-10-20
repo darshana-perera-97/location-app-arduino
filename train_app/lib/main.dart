@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'dart:async';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 void main() {
   runApp(const MyApp());
@@ -33,40 +36,73 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
   String? _firebaseData;
+  String? _firebaseLatitude;
+  String? _firebaseLongitude;
   String? _firebaseDate;
   String? _firebaseUtcTime;
+  double? _latitude;
+  double? _longitude;
   bool _loading = false;
   String? _error;
+  Timer? _timer;
+  late MapController _mapController;
 
   static const String _databaseUrl = 'https://location-app-764dd-default-rtdb.firebaseio.com/.json';
+  static const String _latitudeUrl = 'https://location-app-764dd-default-rtdb.firebaseio.com/Latitude.json';
+  static const String _longitudeUrl = 'https://location-app-764dd-default-rtdb.firebaseio.com/Longitude.json';
   static const String _dateUrl = 'https://location-app-764dd-default-rtdb.firebaseio.com/date.json';
   static const String _utcTimeUrl = 'https://location-app-764dd-default-rtdb.firebaseio.com/UTCTime.json';
 
   @override
   void initState() {
     super.initState();
+    _mapController = MapController();
     _fetchFirebaseData();
+    _startTimer();
   }
 
-  Future<void> _fetchFirebaseData() async {
-    setState(() {
-      _loading = true;
-      _error = null;
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _startTimer() {
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      // Update data for both tabs every second
+      _fetchFirebaseData(showLoading: false);
     });
+  }
+
+  Future<void> _fetchFirebaseData({bool showLoading = true}) async {
+    if (showLoading) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
-      // Fetch all data
-      final response = await http.get(Uri.parse(_databaseUrl));
-      if (response.statusCode == 200) {
-        final dynamic parsed = json.decode(utf8.decode(response.bodyBytes));
-        final String pretty = const JsonEncoder.withIndent('  ').convert(parsed);
+      // Fetch specific latitude and longitude
+      final latitudeResponse = await http.get(Uri.parse(_latitudeUrl));
+      final longitudeResponse = await http.get(Uri.parse(_longitudeUrl));
+      final dateResponse = await http.get(Uri.parse(_dateUrl));
+      final utcTimeResponse = await http.get(Uri.parse(_utcTimeUrl));
+
+      if (latitudeResponse.statusCode == 200) {
+        final latitudeData = json.decode(utf8.decode(latitudeResponse.bodyBytes));
         setState(() {
-          _firebaseData = pretty;
+          _firebaseLatitude = latitudeData?.toString();
+          _latitude = double.tryParse(latitudeData?.toString() ?? '');
         });
       }
 
-      // Fetch specific date and UTCTime
-      final dateResponse = await http.get(Uri.parse(_dateUrl));
-      final utcTimeResponse = await http.get(Uri.parse(_utcTimeUrl));
+      if (longitudeResponse.statusCode == 200) {
+        final longitudeData = json.decode(utf8.decode(longitudeResponse.bodyBytes));
+        setState(() {
+          _firebaseLongitude = longitudeData?.toString();
+          _longitude = double.tryParse(longitudeData?.toString() ?? '');
+        });
+      }
 
       if (dateResponse.statusCode == 200) {
         final dateData = json.decode(utf8.decode(dateResponse.bodyBytes));
@@ -82,17 +118,29 @@ class _MainScreenState extends State<MainScreen> {
         });
       }
 
+      // Always fetch all data for both tabs
+      final response = await http.get(Uri.parse(_databaseUrl));
+      if (response.statusCode == 200) {
+        final dynamic parsed = json.decode(utf8.decode(response.bodyBytes));
+        final String pretty = const JsonEncoder.withIndent('  ').convert(parsed);
+    setState(() {
+          _firebaseData = pretty;
+        });
+      }
+
       if (response.statusCode != 200) {
         setState(() {
           _error = 'HTTP ${response.statusCode}: ${response.reasonPhrase ?? 'Error'}';
         });
       }
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-      });
+      if (showLoading) {
+        setState(() {
+          _error = e.toString();
+        });
+      }
     } finally {
-      if (mounted) {
+      if (mounted && showLoading) {
         setState(() {
           _loading = false;
         });
@@ -110,6 +158,49 @@ class _MainScreenState extends State<MainScreen> {
     return DateFormat('EEEE, MMMM dd, yyyy').format(now);
   }
 
+  String _convertToSriLankaTime(String? utcTime, String? date) {
+    if (utcTime == null) return 'N/A';
+    
+    try {
+      String dateTimeString;
+      
+      if (date != null && date.isNotEmpty) {
+        // We have both date and time
+        if (date.contains('-') && utcTime.contains(':')) {
+          dateTimeString = '$date $utcTime';
+        } else if (date.contains(' ') && date.contains(':')) {
+          dateTimeString = date;
+        } else if (utcTime.contains(' ') && utcTime.contains('-')) {
+          dateTimeString = utcTime;
+        } else {
+          dateTimeString = '$date $utcTime';
+        }
+      } else {
+        // Only have UTC time, use current date
+        final now = DateTime.now();
+        final currentDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+        dateTimeString = '$currentDate $utcTime';
+      }
+      
+      // Parse the date and UTC time from Firebase
+      final dateTime = DateTime.parse(dateTimeString);
+      // Convert UTC to Sri Lanka time (UTC+5:30)
+      final sriLankaTime = dateTime.toUtc().add(const Duration(hours: 5, minutes: 30));
+      
+      // Format as Sri Lanka time with timezone
+      return DateFormat('yyyy-MM-dd HH:mm:ss (+05:30)').format(sriLankaTime);
+    } catch (e) {
+      // Return the raw values for debugging
+      return 'Raw: $date $utcTime';
+    }
+  }
+
+  void _recenterMap() {
+    if (_latitude != null && _longitude != null) {
+      _mapController.move(LatLng(_latitude!, _longitude!), 15.0);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -118,7 +209,7 @@ class _MainScreenState extends State<MainScreen> {
         title: const Text('Location App'),
         actions: [
           IconButton(
-            onPressed: _loading ? null : _fetchFirebaseData,
+            onPressed: _loading ? null : () => _fetchFirebaseData(),
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh Data',
           ),
@@ -134,8 +225,8 @@ class _MainScreenState extends State<MainScreen> {
         },
         items: const [
           BottomNavigationBarItem(
-            icon: Icon(Icons.access_time),
-            label: 'Time',
+            icon: Icon(Icons.location_on),
+            label: 'Location',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.data_object),
@@ -149,103 +240,228 @@ class _MainScreenState extends State<MainScreen> {
   Widget _getCurrentPage() {
     switch (_currentIndex) {
       case 0:
-        return _buildTimePage();
+        return _buildLocationPage();
       case 1:
         return _buildDataPage();
       default:
-        return _buildTimePage();
+        return _buildLocationPage();
     }
   }
 
-  Widget _buildTimePage() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.access_time,
-            size: 80,
-            color: Colors.deepPurple,
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'Firebase Date & Time',
-            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-              fontWeight: FontWeight.bold,
-              color: Colors.deepPurple,
+  Widget _buildLocationPage() {
+    return Stack(
+      children: [
+        // Full screen map
+        if (_latitude != null && _longitude != null)
+          FlutterMap(
+            mapController: _mapController,
+            options: MapOptions(
+              initialCenter: LatLng(_latitude!, _longitude!),
+              initialZoom: 15.0,
             ),
-          ),
-          const SizedBox(height: 30),
-          if (_firebaseDate != null) ...[
-            const Text(
-              'Date from Firebase:',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.deepPurple.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.deepPurple.withOpacity(0.3)),
+            children: [
+              TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.example.location_app',
               ),
-              child: Text(
-                _firebaseDate!,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w500,
+              MarkerLayer(
+                markers: [
+                  Marker(
+                    point: LatLng(_latitude!, _longitude!),
+                    child: const Icon(
+                      Icons.location_on,
+                      color: Colors.red,
+                      size: 40,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        
+        // Overlay with coordinates and controls
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            margin: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.9),
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
                 ),
-              ),
+              ],
             ),
-            const SizedBox(height: 20),
-          ],
-          if (_firebaseUtcTime != null) ...[
-            const Text(
-              'UTC Time from Firebase:',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.deepPurple.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.deepPurple.withOpacity(0.3)),
-              ),
-              child: Text(
-                _firebaseUtcTime!,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w500,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.location_on,
+                      color: Colors.deepPurple,
+                      size: 24,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Location (${_firebaseLatitude ?? 'N/A'}, ${_firebaseLongitude ?? 'N/A'})',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.deepPurple,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (_loading)
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                  ],
                 ),
+                const SizedBox(height: 8),
+                if (_firebaseUtcTime != null) ...[
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.access_time,
+                        color: Colors.grey,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          'Last Updated (SL Time): ${_convertToSriLankaTime(_firebaseUtcTime, _firebaseDate)}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  // Debug info - remove this later
+                  // Text(
+                  //   'Debug - Date: ${_firebaseDate ?? 'null'}, Time: ${_firebaseUtcTime ?? 'null'}',
+                  //   style: const TextStyle(
+                  //     fontSize: 10,
+                  //     color: Colors.red,
+                  //   ),
+                  // ),
+                  const SizedBox(height: 8),
+                ],
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _loading ? null : () => _fetchFirebaseData(),
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('Refresh'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.deepPurple,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        'Auto-refresh: Both tabs',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.green,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        
+        // No data message (only shown when no coordinates)
+        if (_firebaseLatitude == null && _firebaseLongitude == null)
+          Center(
+            child: Container(
+              margin: const EdgeInsets.all(32),
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.95),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.location_off,
+                    size: 60,
+                    color: Colors.grey,
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'No Location Data',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Make sure your Firebase has /Latitude and /Longitude paths',
+                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: _loading ? null : () => _fetchFirebaseData(),
+                    icon: _loading ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ) : const Icon(Icons.refresh),
+                    label: Text(_loading ? 'Loading...' : 'Refresh Data'),
+                  ),
+                ],
               ),
             ),
-          ],
-          if (_firebaseDate == null && _firebaseUtcTime == null) ...[
-            const SizedBox(height: 20),
-            const Text(
-              'No date/time data found in Firebase',
-              style: TextStyle(fontSize: 16, color: Colors.grey),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Make sure your Firebase has /date and /UTCTime paths',
-              style: TextStyle(fontSize: 14, color: Colors.grey),
-              textAlign: TextAlign.center,
-            ),
-          ],
-          const SizedBox(height: 30),
-          ElevatedButton.icon(
-            onPressed: _loading ? null : _fetchFirebaseData,
-            icon: _loading ? const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ) : const Icon(Icons.refresh),
-            label: Text(_loading ? 'Loading...' : 'Refresh Data'),
           ),
-        ],
-      ),
+        
+        // Floating action button to re-center map
+        if (_latitude != null && _longitude != null)
+          Positioned(
+            bottom: 20,
+            right: 20,
+            child: FloatingActionButton(
+              onPressed: _recenterMap,
+              backgroundColor: Colors.deepPurple,
+              foregroundColor: Colors.white,
+              child: const Icon(Icons.my_location),
+              tooltip: 'Re-center to current location',
+            ),
+          ),
+      ],
     );
   }
 
@@ -256,8 +472,8 @@ class _MainScreenState extends State<MainScreen> {
             ? Center(
                 child: Padding(
                   padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       const Icon(
                         Icons.error_outline,
@@ -277,7 +493,7 @@ class _MainScreenState extends State<MainScreen> {
                       ),
                       const SizedBox(height: 20),
                       ElevatedButton.icon(
-                        onPressed: _fetchFirebaseData,
+                        onPressed: () => _fetchFirebaseData(),
                         icon: const Icon(Icons.refresh),
                         label: const Text('Retry'),
                       ),
@@ -302,7 +518,7 @@ class _MainScreenState extends State<MainScreen> {
                             children: [
                               const Icon(Icons.data_object, color: Colors.deepPurple),
                               const SizedBox(width: 8),
-                              Text(
+            Text(
                                 'Firebase Realtime Database',
                                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                                   fontWeight: FontWeight.bold,
@@ -327,10 +543,10 @@ class _MainScreenState extends State<MainScreen> {
                                 fontSize: 12,
                               ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
